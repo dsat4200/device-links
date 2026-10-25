@@ -64,8 +64,8 @@ made other account changes while trusted: unlink is not compromise recovery.
 
 Application: this repository. System policy: `~/nixos-config`.
 The config pins an application commit; `amber pull` prefetches that locked
-source using the normal user's GitHub credential helper, and `rebuild` installs
-the matching version. No moving-branch updater runs in the app or as root.
+public source and `rebuild` installs the matching version. No GitHub sign-in is
+required to fetch it. No moving-branch updater runs in the app or as root.
 
 The dedicated KDE Connect build includes only the identity-exchange plugin.
 It exchanges bounded public metadata, never commands or passwords. OpenSSH
