@@ -86,6 +86,12 @@ class Window(QMainWindow):
                 linked = "Waiting for approval"
             elif row.get("approved") and not row["linked"]:
                 linked = "Approved here · waiting for peer approval"
+            if row.get("phase") == "waiting-plugin":
+                linked = "Paired · preparing SSH link"
+            elif row.get("phase") == "waiting-peer-identity":
+                linked = "Paired · waiting for other app"
+            elif row.get("phase") == "checking-ssh":
+                linked = "Testing SSH"
             if row.get("problem"):
                 linked += " · Connection problem"
             item = QListWidgetItem(f"{row['hostname']}     {status} · {linked}")
@@ -108,7 +114,7 @@ class Window(QMainWindow):
                                         and not row.get("approved") and not self.backend.key_error)
         self.buttons["Unlink"].setEnabled(bool(row.get("id")) and (linked or row.get("approved", False) or row.get("paired", False)))
         protocols = ", ".join(p["protocol"] for p in row.get("desktopEndpoints", []))
-        self.details.setText(row.get("problem") or (f"Remote desktop: {protocols}. Opens in Remmina." if protocols else
+        self.details.setText(row.get("problem") or row.get("statusDetail") or (f"Remote desktop: {protocols}. Opens in Remmina." if protocols else
                              "Remote desktop: no endpoint reported. Remmina SSH is available after linking; desktop services are configured separately."))
 
     def link(self):
@@ -159,8 +165,7 @@ class Window(QMainWindow):
 
     def diagnostics(self):
         from PySide6.QtWidgets import QDialog, QDialogButtonBox
-        report = {"hostname": self.backend.host, "devices": self.backend.rows(),
-                  "identityProblem": self.backend.key_error, "discoveryProblem": self.backend.scan_error,
+        report = self.backend.diagnostics() | {
                   "help": "device-links --help; journalctl --user -u device-links.service",
                   "checks": ["Both peers must have pulled and rebuilt the integration.",
                              "Initial pairing needs both devices logged in and the app running.",

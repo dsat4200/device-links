@@ -106,6 +106,8 @@ class State:
         if not peer.get("approved") or peer.get("certificate") != certificate:
             raise ValueError("Peer certificate has not been approved locally")
         data = descriptor(document, self.roster)
+        if peer.get("hostname") and peer["hostname"] != data["hostname"]:
+            raise ValueError("Peer hostname does not match the device approved in the pairing dialog")
         old = peer.get("descriptor")
         if old and (old["hostKey"] != data["hostKey"] or old["publicKey"] != data["publicKey"] or old["hostname"] != data["hostname"]):
             raise ValueError("Peer identity changed; unlink and approve it again")

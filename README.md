@@ -79,3 +79,25 @@ See [protocol and state](docs/PROTOCOL.md). Build with `nix build`; run tests wi
 Version 0.1 is an initial implementation. Automated tests do not substitute for
 two-device acceptance testing of discovery, keyring unlock, sudo ticket scope,
 and the actual Remmina/libssh plugins.
+
+### 0.1.1 pairing fix
+
+Pairing now uses explicit D-Bus calls instead of cached `QDBusInterface`
+introspection. Qt can report a valid interface for a nonexistent object;
+KDE Connect creates/removes the identity plugin object during pairing.
+Device Links waits for the loaded plugin and retries temporary missing-object
+errors without erasing human approval or stopping discovery of other devices.
+The GUI distinguishes waiting for approval, preparing the SSH link, exchanging
+identities and checking SSH. Approve both screens within KDE Connect's
+30-second request window; expired or changed requests cannot authorize keys.
+
+Troubleshoot and CLI JSON now share `phase`, `statusDetail`, `lastError`,
+`lastOperationError` and a bounded `recentEvents` list. D-Bus errors identify
+the service/path/interface/method but never include call arguments, passwords,
+verification codes, private keys or command output. The user journal records
+those same state transitions. Update both devices with pull/rebuild and reopen
+the app; there is no need to delete identities or manually copy keys.
+
+Pairing regression tests run a real private D-Bus with controlled peer/plugin
+registration, including objects that appear late or disappear between calls.
+No test pairs real devices or reads their keyrings/authorization files.

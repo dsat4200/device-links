@@ -10,6 +10,7 @@
    valid Ed25519 keys and RDP/VNC endpoint declarations. The hostname remains
    only a label; the approved certificate is the identity. Conflicting names,
    changed SSH keys and changed certificates fail closed and need reapproval.
+   The descriptor hostname must match the name shown in the approval dialog.
 6. Public keys enter the separate app-owned AuthorizedKeysFile declared by Nix.
    There are no edits to manual authorized_keys and no root pairing service.
 7. SSH clients require a pinned host key; forwarding and agent forwarding are
@@ -28,6 +29,20 @@ per connection. Supported operations: show, list, scan, doctor, resolve, gsudo.
 Pair/approve/accept are deliberately not in the agent API. gsudo streams bounded
 base64 stdout/stderr frames and a final exit code. Same-UID local applications
 can request a prompt but not approve it through this API.
+
+Readiness (0.1.1): do not use QDBusInterface.isValid() for a live object: Qt may
+return true while Introspect/actual calls return UnknownObject. Explicit method
+calls and Properties.Get avoid cached introspection. A successful paired flag
+is followed by checking loadedPlugins, then publishing/receiving metadata.
+UnknownObject/UnknownInterface/UnknownMethod or a disconnected service during
+that handoff are retryable; no keys are installed without local approval and
+validated metadata. Missing peer objects preserve existing grants, while an
+explicitly observed unpaired state removes app-managed grants. Individual peer
+errors never abort the entire scan. Polling is guarded against reentrancy, and
+an active verification dialog cannot install keys or lose its pending state.
+Approval rechecks the exact code, certificate and hostname after the human
+responds, rejecting expired or changed requests rather than silently approving
+a replacement. Session diagnostics expose only bounded operation/error metadata.
 
 Remote sudo worker: launched only through authenticated, host-key-pinned SSH
 using the stable system paths (`/run/current-system/sw/bin/device-links` and the

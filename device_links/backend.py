@@ -6,33 +6,19 @@ from pathlib import Path
 import socket
 import subprocess
 import sys
+import time
+from collections import deque
 
 from PySide6.QtCore import QObject, QProcess, QTimer
-from PySide6.QtDBus import QDBusConnection, QDBusInterface, QDBusMessage
 from PySide6.QtNetwork import QLocalServer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QDialogButtonBox,
                               QLabel, QLineEdit, QMessageBox, QVBoxLayout)
 
 from . import VERSION
 from .client import runtime
-from .model import State, atomic, descriptor, remmina_profiles, profile_path
+from .dbus import BASE, PLUGIN, UNAVAILABLE, NOT_READY, DBusError, call, interface
+from .model import DEVICE_ID, State, atomic, descriptor, remmina_profiles, profile_path
 from .transport import REMOTE_WORKER, remote_command, ssh_args
-
-SERVICE = "org.kde.kdeconnect"
-BASE = "/modules/kdeconnect"
-
-
-def interface(path, name):
-    return QDBusInterface(SERVICE, path, name, QDBusConnection.sessionBus())
-
-
-def call(obj, method, *args):
-    reply = obj.call(method, *args)
-    if reply.type() == QDBusMessage.ErrorMessage:
-        raise RuntimeError(reply.errorMessage())
-    arguments = reply.arguments()
-    return arguments[0] if arguments else None
-
 
 class SudoConnection(QObject):
     def __init__(self, backend, device_id):
@@ -145,7 +131,14 @@ class Backend(QObject):
         self.window = None
         self.key_error = None
         self.scan_error = None
+        self.phases = {}
+        self.peer_errors = {}
+        self.recent_events = deque(maxlen=30)
+        self.last_operation_error = None
+        self._ticking = False
         self.checked = set()
+        self.ssh_inflight = set()
+        self.ssh_verified = set()
         self.jobs = []
         self.kde_process = None
         self.server = QLocalServer(self)
@@ -222,58 +215,162 @@ class Backend(QObject):
     def plugin(self, device_id):
         return interface(f"{BASE}/devices/{device_id}/devicelinks", "org.kde.kdeconnect.device.devicelinks")
 
+    def phase(self, device_id, name, detail):
+        old = self.phases.get(device_id)
+        if old and old["name"] == name and old["detail"] == detail:
+            return
+        self.phases[device_id] = {"name": name, "detail": detail}
+        self.record_event(device_id, name)
+
+    def record_event(self, device_id, operation, error=None):
+        # No arguments, key material, passwords, verification codes or command
+        # output. Report the failing D-Bus operation, not just its raw message.
+        details = error.details if isinstance(error, DBusError) else ({"message": str(error)[:1024]} if error else None)
+        record = {"time": int(time.time()), "device": device_id, "operation": operation}
+        if details:
+            record["error"] = details
+            self.last_operation_error = record
+            self.peer_errors[device_id] = record
+        if self.recent_events:
+            previous = self.recent_events[-1]
+            if {k: v for k, v in previous.items() if k != "time"} == {k: v for k, v in record.items() if k != "time"}:
+                return
+        self.recent_events.append(record)
+        print("device-links: " + json.dumps(record), file=sys.stderr, flush=True)
+
+    def sync_peer(self, device_id, peer, device):
+        record = self.state.peers.get(device_id)
+        # A modal verification dialog processes timers. Do not install keys,
+        # erase a pending approval, or open another dialog while it is active.
+        if device_id in self.pairing_dialogs:
+            return
+        if not peer["paired"]:
+            if peer["incoming"]:
+                self.phase(device_id, "approval-requested", "Compare the code and approve on both devices.")
+                QTimer.singleShot(0, lambda key=device_id: self.approve_pairing(key, incoming=True))
+            elif peer["requested"]:
+                self.phase(device_id, "waiting-peer", "Waiting for approval on the other device.")
+            else:
+                if record:
+                    # The peer may finish pairing between the state snapshot
+                    # and this branch. Never revoke on a mixed/stale snapshot.
+                    if call(device, "pairStateAsInt") != 0:
+                        return
+                    had_access = bool(record.get("descriptor"))
+                    self.forget(device_id, notify=False)
+                    detail = ("Peer unpaired; app-managed access removed." if had_access else
+                              "Pairing expired or was declined. Click Link and approve both screens within 30 seconds.")
+                    self.problems[device_id] = detail
+                    self.phase(device_id, "not-linked", detail)
+                else:
+                    self.phase(device_id, "not-linked", "Click Link to request approval.")
+            return
+        if not record:
+            self.phase(device_id, "approval-required", "Paired by KDE Connect; click Link to approve SSH access here.")
+            return
+        if record["certificate"] != peer["certificate"]:
+            raise ValueError("Peer certificate changed. Unlink and verify the actual device before linking again.")
+        if not peer["reachable"]:
+            self.phase(device_id, "offline", "Trusted peer is offline; existing approval is preserved.")
+            return
+        if self.key_error:
+            self.phase(device_id, "identity-locked", "Unlock this device's identity before exchanging SSH keys.")
+            return
+
+        # Paired and reachable does not imply the dynamically registered plugin
+        # object is ready. isValid() is explicitly NOT a readiness check.
+        if PLUGIN not in (call(device, "loadedPlugins") or []):
+            supported = device.property("supportedPlugins") or []
+            if PLUGIN not in supported:
+                self.problems[device_id] = "Peer does not advertise Device Links; pull, rebuild and open it there."
+                self.phase(device_id, "integration-missing", self.problems[device_id])
+            else:
+                self.phase(device_id, "waiting-plugin", "Pairing approved; waiting for the identity plugin to load.")
+            return
+        try:
+            plugin = self.plugin(device_id)
+            if not call(plugin, "publish", json.dumps(self.local_document())):
+                self.phase(device_id, "waiting-peer", "Waiting for the peer's encrypted link; retrying automatically.")
+                return
+            document = call(plugin, "remoteDocument")
+        except DBusError as exc:
+            if exc.name not in NOT_READY:
+                raise
+            self.phase(device_id, "waiting-plugin", "Identity plugin is not registered yet; retrying automatically.")
+            self.record_event(device_id, "identity-plugin-not-ready", exc)
+            return
+        if not document:
+            self.phase(device_id, "waiting-peer-identity", "Waiting for the other app's approval and SSH identity. Open Device Links there.")
+            return
+        clean = descriptor(json.loads(document), self.roster)
+        if record.get("descriptor") != clean:
+            self.phase(device_id, "exchanging", "Exchanging verified public SSH identities.")
+            self.state.receive(device_id, peer["certificate"], clean)
+            self.reconcile_profiles()
+            self.checked.discard(device_id)
+        self.peer_errors.pop(device_id, None)
+        if device_id not in self.checked:
+            self.checked.add(device_id)
+            self.phase(device_id, "checking-ssh", "Public identities exchanged; testing SSH.")
+            self.test_ssh(device_id, quiet=True)
+        elif device_id in self.ssh_verified and not self.problems.get(device_id):
+            self.phase(device_id, "linked", "SSH identities exchanged and connection checked.")
+
     def tick(self):
+        if self._ticking:
+            return
+        self._ticking = True
         try:
             daemon = self.daemon()
-            if not daemon.isValid():
-                if self.kde_process is None:
-                    self.kde_process = QProcess(self)
-                    # Keep discovery diagnostics in the device-links user journal.
-                    self.kde_process.finished.connect(lambda *_: setattr(self, "kde_process", None))
-                    self.kde_process.start(os.environ["DEVICE_LINKS_KDECONNECT"], [])
-                self.scan_error = "Waiting for discovery service"
-                return
-            call(daemon, "setAnnouncedName", self.host)
             ids = call(daemon, "devices", False, False) or []
+            call(daemon, "setAnnouncedName", self.host)
             peers = {}
             for device_id in ids:
-                device = self.device(device_id)
-                name = device.property("name")
-                if name not in self.roster or name == self.host:
-                    continue
-                certificate = call(device, "encryptionInfo")
-                peer = {"id": device_id, "hostname": name,
-                        "reachable": bool(device.property("isReachable")),
-                        "paired": bool(device.property("isPaired")),
-                        "requested": bool(device.property("isPairRequested")),
-                        "incoming": bool(device.property("isPairRequestedByPeer")),
-                        "certificate": certificate}
-                peers[device_id] = peer
-                if peer["incoming"] and device_id not in self.pairing_dialogs:
-                    QTimer.singleShot(0, lambda key=device_id: self.approve_pairing(key, incoming=True))
-                record = self.state.peers.get(device_id)
-                if record and not peer["paired"] and not peer["requested"] and not peer["incoming"]:
-                    self.forget(device_id, notify=False)
-                if peer["paired"] and record and record["certificate"] == certificate:
-                    plugin = self.plugin(device_id)
-                    if peer["reachable"] and plugin.isValid() and not self.key_error:
-                        call(plugin, "publish", json.dumps(self.local_document()))
-                        document = call(plugin, "remoteDocument")
-                        if document:
-                            clean = json.loads(document)
-                            if record.get("descriptor") != clean:
-                                self.state.receive(device_id, certificate, clean)
-                                self.reconcile_profiles()
-                                self.checked.discard(device_id)
-                            if device_id not in self.checked:
-                                self.checked.add(device_id)
-                                self.test_ssh(device_id, quiet=True)
-                    elif peer["reachable"]:
-                        self.problems[device_id] = "Peer needs the Device Links integration; pull and rebuild it"
+                try:
+                    if not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id):
+                        raise ValueError("Discovery returned an invalid device identity")
+                    device = self.device(device_id)
+                    name = device.property("name")
+                    if name not in self.roster or name == self.host:
+                        continue
+                    pair_state = call(device, "pairStateAsInt")
+                    if pair_state not in (0, 1, 2, 3):
+                        raise ValueError("Discovery returned an unknown pairing state")
+                    peer = {"id": device_id, "hostname": name,
+                            "reachable": bool(device.property("isReachable")),
+                            "paired": pair_state == 3,
+                            "requested": pair_state == 1,
+                            "incoming": pair_state == 2,
+                            "certificate": call(device, "encryptionInfo")}
+                    peers[device_id] = peer
+                    self.sync_peer(device_id, peer, device)
+                except Exception as exc:
+                    # One stale/disappearing object must not abort every peer's
+                    # scan or be mistaken for rejection of an approved identity.
+                    previous = self.peers.get(device_id)
+                    if device_id not in peers and previous:
+                        peers[device_id] = previous | {"reachable": False}
+                    if isinstance(exc, DBusError) and exc.name in NOT_READY:
+                        self.phase(device_id, "waiting-device", "Device service is changing; retrying automatically.")
+                    else:
+                        self.problems[device_id] = str(exc)
+                        self.phase(device_id, "error", str(exc))
+                    self.record_event(device_id, "poll-peer", exc)
             self.peers = peers
             self.scan_error = None
+        except DBusError as exc:
+            self.scan_error = "Discovery service unavailable; retrying automatically."
+            self.record_event(None, "poll-discovery", exc)
+            if exc.name in UNAVAILABLE and self.kde_process is None:
+                self.kde_process = QProcess(self)
+                self.kde_process.setProcessChannelMode(QProcess.ForwardedChannels)
+                self.kde_process.finished.connect(lambda *_: setattr(self, "kde_process", None))
+                self.kde_process.start(os.environ["DEVICE_LINKS_KDECONNECT"], [])
         except Exception as exc:
             self.scan_error = str(exc)
+            self.record_event(None, "poll-discovery", exc)
+        finally:
+            self._ticking = False
         if self.window:
             self.window.refresh()
 
@@ -290,24 +387,40 @@ class Backend(QObject):
             device = self.device(device_id)
             if not device.property("isReachable") and not incoming:
                 raise ValueError("Device is not reachable. Use Rescan after both devices are online.")
-            if not incoming and not device.property("isPaired"):
+            if not incoming and call(device, "pairStateAsInt") != 3:
+                self.problems.pop(device_id, None)
                 call(device, "requestPairing")
             code = call(device, "verificationKey")
             name = device.property("name")
+            certificate = call(device, "encryptionInfo")
+            # Capture exactly the request and certificate shown to the human.
+            # An expired/replaced request must never gain SSH authorization.
             result = QMessageBox.question(self.window, "Approve device link",
                 f"Link {self.host} ↔ {name}?\n\nVerification: {code}\n\n"
                 "Check that the same code appears on the other device.\n"
+                "Approve both screens within 30 seconds.\n"
                 "This grants SSH access to your account in both directions.\n"
                 "Approve only devices you control.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if result == QMessageBox.Yes:
-                self.state.approve(device_id, call(device, "encryptionInfo"), device.property("name"))
-                if device.property("isPairRequestedByPeer"):
+                if call(device, "pairStateAsInt") not in (1, 2, 3):
+                    raise ValueError("Pairing expired or was declined. Click Link and approve both screens within 30 seconds.")
+                if code != call(device, "verificationKey") or certificate != call(device, "encryptionInfo") or name != device.property("name"):
+                    raise ValueError("Pairing identity changed while the dialog was open. Compare a fresh code before approving.")
+                self.state.approve(device_id, certificate, name)
+                if call(device, "pairStateAsInt") == 2:
                     call(device, "acceptPairing")
+                self.phase(device_id, "waiting-peer", "Approved here; waiting for pairing and the identity plugin.")
+                self.record_event(device_id, "local-approval")
             else:
                 call(device, "cancelPairing")
                 self.state.forget(device_id)
         except Exception as exc:
-            self.problem(str(exc))
+            self.record_event(device_id, "approve-pairing", exc)
+            detail = ("The device's discovery object changed during pairing. Rescan and try Link again. "
+                      "The exact D-Bus operation is in Troubleshoot / copy report."
+                      if isinstance(exc, DBusError) and exc.name in NOT_READY else str(exc))
+            self.problems[device_id] = detail
+            self.problem(detail)
         finally:
             self.pairing_dialogs.discard(device_id)
             self.tick()
@@ -346,6 +459,9 @@ class Backend(QObject):
             profile_path(self.remmina, device_id, protocol).unlink(missing_ok=True)
         self.problems.pop(device_id, None)
         self.checked.discard(device_id)
+        self.ssh_verified.discard(device_id)
+        self.phases.pop(device_id, None)
+        self.peer_errors.pop(device_id, None)
         self.reconcile_profiles()
         if notify:
             call(self.device(device_id), "unpair")
@@ -372,6 +488,10 @@ class Backend(QObject):
                 row["approved"] = key in self.state.peers
                 row["desktopEndpoints"] = linked.get(key, {}).get("desktopEndpoints", [])
                 row["problem"] = self.problems.get(key)
+                phase = self.phases.get(key, {})
+                row["phase"] = phase.get("name", "offline" if not row["reachable"] else "not-linked")
+                row["statusDetail"] = phase.get("detail")
+                row["lastError"] = self.peer_errors.get(key)
                 rows.append(row)
         return rows
 
@@ -382,16 +502,30 @@ class Backend(QObject):
         return matches[0]
 
     def test_ssh(self, device_id, quiet=False):
+        if device_id in self.ssh_inflight:
+            return
         peer = self.state.linked()[device_id]
         args = ssh_args(peer, device_id, self.state.root, self.identity)
         proc = QProcess(self)
         self.jobs.append(proc)
+        self.ssh_inflight.add(device_id)
         def done(code, _status):
+            self.ssh_inflight.discard(device_id)
             output = bytes(proc.readAllStandardError()).decode(errors="replace").strip()
+            # An unlink can happen while the harmless connection check runs.
+            # Do not resurrect its status or display a stale success message.
+            if device_id not in self.state.linked():
+                self.jobs.remove(proc)
+                proc.deleteLater()
+                return
             if code:
+                self.ssh_verified.discard(device_id)
                 self.problems[device_id] = output or "SSH check failed"
+                self.phase(device_id, "ssh-failed", "SSH check failed; see Troubleshoot for the connection error.")
             else:
+                self.ssh_verified.add(device_id)
                 self.problems.pop(device_id, None)
+                self.phase(device_id, "linked", "SSH connection checked successfully.")
             if not quiet:
                 self.problem(output if code else "SSH works. No administrator changes were made.")
             self.jobs.remove(proc)
@@ -443,6 +577,12 @@ class Backend(QObject):
     def problem(self, text):
         QMessageBox.information(self.window, "Device Links", text)
 
+    def diagnostics(self):
+        return {"schema": 1, "version": VERSION, "hostname": self.host, "devices": self.rows(),
+                "identityProblem": self.key_error, "discoveryProblem": self.scan_error,
+                "lastOperationError": self.last_operation_error, "recentEvents": list(self.recent_events),
+                "services": {"backend": "device-links.service", "discovery": "kdeconnectd"}}
+
     def accept(self):
         while self.server.hasPendingConnections():
             client = self.server.nextPendingConnection()
@@ -474,9 +614,7 @@ class Backend(QObject):
             elif op in ("list", "scan", "doctor"):
                 if op == "scan":
                     self.scan()
-                response = {"schema": 1, "version": VERSION, "hostname": self.host, "devices": self.rows(),
-                            "identityProblem": self.key_error, "discoveryProblem": self.scan_error,
-                            "services": {"backend": "device-links.service", "discovery": "kdeconnectd"}}
+                response = self.diagnostics()
             elif op == "resolve":
                 key, peer = self.resolve(request["target"])
                 response = {"id": key, "peer": peer, "state": str(self.state.root), "identity": str(self.identity)}

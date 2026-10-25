@@ -24,7 +24,7 @@ class OfflineBackend(Backend):
         pass
 
 
-class BackendTests(unittest.TestCase):
+class BackendFixture:
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
@@ -61,6 +61,8 @@ class BackendTests(unittest.TestCase):
                 time.sleep(0.005)
             return result.result(timeout=1)
 
+
+class BackendTests(BackendFixture, unittest.TestCase):
     def test_local_ipc_and_offline_roster(self):
         status = self.request({"op": "list"})
         self.assertEqual(status["hostname"], "self")

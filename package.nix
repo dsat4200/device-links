@@ -23,17 +23,21 @@ let
   python = pkgs.python3.withPackages (ps: [ ps.pyside6 ps.keyring ps.secretstorage ]);
 in pkgs.stdenvNoCC.mkDerivation {
   pname = "device-links";
-  version = "0.1.0";
+  version = "0.1.1";
   src = pkgs.lib.cleanSource ./.;
   nativeBuildInputs = [ pkgs.makeWrapper pkgs.qt6.wrapQtAppsHook ];
-  nativeCheckInputs = [ pkgs.openssh ];
+  nativeCheckInputs = [ pkgs.openssh pkgs.dbus ];
   buildInputs = [ pkgs.qt6.qtbase ];
   dontWrapQtApps = true;
   dontBuild = true;
   doCheck = true;
   checkPhase = ''
     export PYTHONDONTWRITEBYTECODE=1 QT_QPA_PLATFORM=offscreen
-    ${python}/bin/python -m unittest discover -s tests -v
+    export QT_NO_XDG_DESKTOP_PORTAL=1 QT_ACCESSIBILITY=0 NO_AT_BRIDGE=1
+    export HOME="$TMPDIR/device-links-check-home" XDG_CACHE_HOME="$TMPDIR/device-links-check-cache"
+    mkdir -p "$HOME" "$XDG_CACHE_HOME"
+    dbus-run-session --config-file=${pkgs.dbus}/share/dbus-1/session.conf \
+      -- ${python}/bin/python -m unittest discover -s tests -v
   '';
   installPhase = ''
     mkdir -p $out/lib/device-links $out/bin $out/share/doc/device-links

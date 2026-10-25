@@ -61,6 +61,12 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.state.receive("two", "cert2", document())
 
+    def test_approved_name_cannot_change_during_identity_exchange(self):
+        self.state.approve("one", "cert1", "third")
+        with self.assertRaisesRegex(ValueError, "hostname does not match"):
+            self.state.receive("one", "cert1", document())
+        self.assertEqual(self.state.linked(), {})
+
     def test_roster_is_not_trust_and_removed_host_loses_grant(self):
         self.state.approve("one", "cert1")
         with self.assertRaises(ValueError):
