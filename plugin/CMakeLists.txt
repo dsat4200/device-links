@@ -1,0 +1,2 @@
+kdeconnect_add_plugin(kdeconnect_devicelinks SOURCES devicelinksplugin.cpp)
+target_link_libraries(kdeconnect_devicelinks kdeconnectcore Qt::DBus)

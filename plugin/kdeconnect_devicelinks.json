@@ -1,0 +1,12 @@
+{
+  "KPlugin": {
+    "Id": "kdeconnect_devicelinks",
+    "Name": "Device Links identity exchange",
+    "Description": "Exchange public SSH setup metadata after approved pairing",
+    "Icon": "network-connect",
+    "EnabledByDefault": true,
+    "License": "GPL-3.0-or-later"
+  },
+  "X-KdeConnect-SupportedPacketType": ["org.amber.devicelinks.identity"],
+  "X-KdeConnect-OutgoingPacketType": ["org.amber.devicelinks.identity"]
+}
