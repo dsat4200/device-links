@@ -111,7 +111,9 @@ class Window(QMainWindow):
         for label, button in self.buttons.items():
             button.setEnabled(linked)
         self.buttons["Link"].setEnabled(bool(row.get("id")) and row.get("reachable", False) and not linked
-                                        and not row.get("approved") and not self.backend.key_error)
+                                        and not row.get("approved") and not row.get("requested")
+                                        and not self.backend.pairing_dialogs and not self.backend.key_error)
+        self.buttons["Link"].setText("Approve request" if row.get("incoming") else "Link")
         self.buttons["Unlink"].setEnabled(bool(row.get("id")) and (linked or row.get("approved", False) or row.get("paired", False)))
         protocols = ", ".join(p["protocol"] for p in row.get("desktopEndpoints", []))
         self.details.setText(row.get("problem") or row.get("statusDetail") or (f"Remote desktop: {protocols}. Opens in Remmina." if protocols else

@@ -101,3 +101,22 @@ the app; there is no need to delete identities or manually copy keys.
 Pairing regression tests run a real private D-Bus with controlled peer/plugin
 registration, including objects that appear late or disappear between calls.
 No test pairs real devices or reads their keyrings/authorization files.
+
+### 0.1.2 visible incoming consent
+
+Click **Link on one device only**. The recipient automatically opens a separate
+**Device Links — Pairing Approval** window, even when its manager is closed,
+hidden or minimized. Matching Sway integration permits only this exact consent
+window above fullscreen, never the manager or unrelated floaters. Native
+Wayland/X11 application identities are stable and the Qt Wayland plugin is
+included. Both devices must pull/rebuild to receive the app and window rules.
+
+An existing outgoing/incoming request is reused, not restarted; another click
+raises the current dialog instead of changing its timestamp/code. Expired,
+disconnected or changed requests close their old dialogs automatically and
+cannot cancel/approve a replacement request. **Never accept different codes.**
+Diagnostics include `approvalPromptVisible` plus dialog-opening/visible events,
+without logging verification codes. Tests now drive the real Qt consent window
+and buttons, including hidden/minimized managers, expiry and replacement codes.
+Accepting KDE Connect's notification does not bypass SSH consent: the app still
+opens its own comparison dialog even if native pairing finishes before polling.

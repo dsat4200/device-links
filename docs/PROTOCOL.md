@@ -44,6 +44,23 @@ Approval rechecks the exact code, certificate and hostname after the human
 responds, rejecting expired or changed requests rather than silently approving
 a replacement. Session diagnostics expose only bounded operation/error metadata.
 
+Consent presentation (0.1.2): incoming requests automatically open a standalone
+parentless modal PairingDialog, not a QMessageBox parented to the manager. Its
+stable window title is `Device Links — Pairing Approval`; the Nix Sway policy
+matches that exact title AND the app's identity. Other app windows do not gain
+fullscreen permission. Wayland app_id/X11 class use `org.amber.DeviceLinks`.
+Repeated Link calls reuse pending requests and raise existing consent, never
+call requestPairing again while a request is pending (that native convenience
+method can implicitly accept incoming pairing before consent). Only an idle
+state starts a request. A watchdog revalidates the displayed code/certificate/
+name/state while the dialog is visible and again on acceptance. A changed or
+expired dialog closes without cancelling the replacement session. Consent
+dialogs are serialized; no keys are installed until the real affirmative click.
+An unfinished approval stores only a request-binding digest, checked again
+before metadata exchange and removed once the link is established. It cannot
+authorize another attempt using the same certificate but a different code;
+neither raw codes nor binding digests appear in logs or diagnostic reports.
+
 Remote sudo worker: launched only through authenticated, host-key-pinned SSH
 using the stable system paths (`/run/current-system/sw/bin/device-links` and the
 setuid `/run/wrappers/bin/sudo`), because sshd's non-interactive PATH excludes

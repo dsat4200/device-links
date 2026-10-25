@@ -23,11 +23,11 @@ let
   python = pkgs.python3.withPackages (ps: [ ps.pyside6 ps.keyring ps.secretstorage ]);
 in pkgs.stdenvNoCC.mkDerivation {
   pname = "device-links";
-  version = "0.1.1";
+  version = "0.1.2";
   src = pkgs.lib.cleanSource ./.;
   nativeBuildInputs = [ pkgs.makeWrapper pkgs.qt6.wrapQtAppsHook ];
   nativeCheckInputs = [ pkgs.openssh pkgs.dbus ];
-  buildInputs = [ pkgs.qt6.qtbase ];
+  buildInputs = [ pkgs.qt6.qtbase pkgs.qt6.qtwayland ];
   dontWrapQtApps = true;
   dontBuild = true;
   doCheck = true;

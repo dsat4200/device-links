@@ -1,5 +1,6 @@
 """Session GUI/backend. Local IPC is same-user only; network commands use SSH."""
 import base64
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ from . import VERSION
 from .client import runtime
 from .dbus import BASE, PLUGIN, UNAVAILABLE, NOT_READY, DBusError, call, interface
 from .model import DEVICE_ID, State, atomic, descriptor, remmina_profiles, profile_path
+from .pairing import PairingDialog, PairingSessionEnded
 from .transport import REMOTE_WORKER, remote_command, ssh_args
 
 class SudoConnection(QObject):
@@ -128,6 +130,10 @@ class Backend(QObject):
         self.peers = {}
         self.problems = {}
         self.pairing_dialogs = set()
+        self.queued_pairings = set()
+        self.active_pairing_dialog = None
+        self.offered_transport_approval = set()
+        self._closing = False
         self.window = None
         self.key_error = None
         self.scan_error = None
@@ -247,7 +253,9 @@ class Backend(QObject):
         if not peer["paired"]:
             if peer["incoming"]:
                 self.phase(device_id, "approval-requested", "Compare the code and approve on both devices.")
-                QTimer.singleShot(0, lambda key=device_id: self.approve_pairing(key, incoming=True))
+                if not self.pairing_dialogs and device_id not in self.queued_pairings:
+                    self.queued_pairings.add(device_id)
+                    QTimer.singleShot(0, lambda key=device_id: self.open_incoming_pairing(key))
             elif peer["requested"]:
                 self.phase(device_id, "waiting-peer", "Waiting for approval on the other device.")
             else:
@@ -267,9 +275,27 @@ class Backend(QObject):
             return
         if not record:
             self.phase(device_id, "approval-required", "Paired by KDE Connect; click Link to approve SSH access here.")
+            # A recipient may click KDE Connect's own notification before our
+            # next poll sees RequestedByPeer. Native pairing is not SSH consent:
+            # still show our real code-comparison dialog, once, automatically.
+            if (peer["reachable"] and device_id not in self.offered_transport_approval
+                    and device_id not in self.queued_pairings and not self.pairing_dialogs):
+                self.offered_transport_approval.add(device_id)
+                self.queued_pairings.add(device_id)
+                QTimer.singleShot(0, lambda key=device_id: self.open_incoming_pairing(key))
             return
         if record["certificate"] != peer["certificate"]:
             raise ValueError("Peer certificate changed. Unlink and verify the actual device before linking again.")
+        if not record.get("descriptor"):
+            expected = self.pairing_token(peer["hostname"], call(device, "verificationKey"), peer["certificate"])
+            if record.get("requestToken") != expected:
+                # Human consent for an unfinished request is not transferable
+                # to a later request, even when the device certificate is the same.
+                self.forget(device_id, notify=False)
+                detail = "The previous approval belongs to a different or interrupted request. Compare a fresh code before linking."
+                self.problems[device_id] = detail
+                self.phase(device_id, "approval-required", detail)
+                return
         if not peer["reachable"]:
             self.phase(device_id, "offline", "Trusted peer is offline; existing approval is preserved.")
             return
@@ -317,7 +343,7 @@ class Backend(QObject):
             self.phase(device_id, "linked", "SSH identities exchanged and connection checked.")
 
     def tick(self):
-        if self._ticking:
+        if self._ticking or self._closing:
             return
         self._ticking = True
         try:
@@ -380,40 +406,56 @@ class Backend(QObject):
         self.tick()
 
     def approve_pairing(self, device_id, incoming=False):
-        if device_id in self.pairing_dialogs:
+        if self.pairing_dialogs:
+            # Never nest consent dialogs or start a second request because a
+            # button/queued callback fired while another consent is visible.
+            if device_id in self.pairing_dialogs and self.active_pairing_dialog:
+                self.active_pairing_dialog.present()
             return
         self.pairing_dialogs.add(device_id)
         try:
             device = self.device(device_id)
-            if not device.property("isReachable") and not incoming:
+            if not device.property("isReachable"):
                 raise ValueError("Device is not reachable. Use Rescan after both devices are online.")
-            if not incoming and call(device, "pairStateAsInt") != 3:
-                self.problems.pop(device_id, None)
+            pair_state = call(device, "pairStateAsInt")
+            if incoming and pair_state not in (2, 3):
+                self.record_event(device_id, "incoming-request-no-longer-pending")
+                return
+            self.problems.pop(device_id, None)
+            if pair_state == 0:
+                # Only the idle side starts a request. In particular do not
+                # restart an outgoing timestamp or implicitly accept incoming
+                # pairing via KDE Connect's requestPairing() convenience path.
                 call(device, "requestPairing")
+                self.record_event(device_id, "pairing-request-started")
+            elif pair_state in (1, 2):
+                self.record_event(device_id, "pairing-request-reused")
             code = call(device, "verificationKey")
             name = device.property("name")
             certificate = call(device, "encryptionInfo")
             # Capture exactly the request and certificate shown to the human.
             # An expired/replaced request must never gain SSH authorization.
-            result = QMessageBox.question(self.window, "Approve device link",
-                f"Link {self.host} ↔ {name}?\n\nVerification: {code}\n\n"
-                "Check that the same code appears on the other device.\n"
-                "Approve both screens within 30 seconds.\n"
-                "This grants SSH access to your account in both directions.\n"
-                "Approve only devices you control.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-            if result == QMessageBox.Yes:
-                if call(device, "pairStateAsInt") not in (1, 2, 3):
-                    raise ValueError("Pairing expired or was declined. Click Link and approve both screens within 30 seconds.")
-                if code != call(device, "verificationKey") or certificate != call(device, "encryptionInfo") or name != device.property("name"):
-                    raise ValueError("Pairing identity changed while the dialog was open. Compare a fresh code before approving.")
-                self.state.approve(device_id, certificate, name)
+            self.check_pairing_request(device, name, code, certificate)
+            if self.confirm_pairing(device_id, name, code, certificate):
+                self.check_pairing_request(device, name, code, certificate)
+                self.state.approve(device_id, certificate, name, self.pairing_token(name, code, certificate))
                 if call(device, "pairStateAsInt") == 2:
                     call(device, "acceptPairing")
                 self.phase(device_id, "waiting-peer", "Approved here; waiting for pairing and the identity plugin.")
                 self.record_event(device_id, "local-approval")
             else:
+                self.check_pairing_request(device, name, code, certificate)
                 call(device, "cancelPairing")
                 self.state.forget(device_id)
+                self.record_event(device_id, "pairing-declined-locally")
+        except PairingSessionEnded as exc:
+            # Do not leave a stale code visible, show another modal error, or
+            # cancel a replacement request using the previous dialog's answer.
+            self.record_event(device_id, "pairing-dialog-expired-or-changed", exc)
+            if device_id in self.state.peers and not self.state.peers[device_id].get("descriptor"):
+                self.forget(device_id, notify=False)
+            self.problems[device_id] = str(exc)
+            self.phase(device_id, "not-linked", str(exc))
         except Exception as exc:
             self.record_event(device_id, "approve-pairing", exc)
             detail = ("The device's discovery object changed during pairing. Rescan and try Link again. "
@@ -424,6 +466,42 @@ class Backend(QObject):
         finally:
             self.pairing_dialogs.discard(device_id)
             self.tick()
+
+    def open_incoming_pairing(self, device_id):
+        self.queued_pairings.discard(device_id)
+        if not self._closing:
+            self.approve_pairing(device_id, incoming=True)
+
+    def check_pairing_request(self, device, name, code, certificate):
+        if call(device, "pairStateAsInt") not in (1, 2, 3):
+            raise PairingSessionEnded("Pairing expired or was declined. Start again from only one device and approve both screens within 30 seconds.")
+        if not device.property("isReachable"):
+            raise PairingSessionEnded("Peer disconnected. The old pairing dialog was closed; reconnect and start a fresh request.")
+        if code != call(device, "verificationKey") or certificate != call(device, "encryptionInfo") or name != device.property("name"):
+            raise PairingSessionEnded("Pairing identity or code changed. The old dialog was closed; compare a fresh request started on only one device.")
+
+    @staticmethod
+    def pairing_token(name, code, certificate):
+        # Persist only a digest until metadata exchange completes; neither raw
+        # codes nor this internal binding enter diagnostic reports or logs.
+        return hashlib.sha256(json.dumps([name, code, certificate]).encode()).hexdigest()
+
+    def confirm_pairing(self, device_id, name, code, certificate):
+        device = self.device(device_id)
+        dialog = PairingDialog(self.host, name, code,
+                               lambda: self.check_pairing_request(device, name, code, certificate))
+        dialog.presented.connect(lambda: self.record_event(device_id, "approval-dialog-visible"))
+        self.active_pairing_dialog = dialog
+        self.record_event(device_id, "approval-dialog-opening")
+        try:
+            # QDialog.exec opens a real standalone dialog even if the manager
+            # has never been opened, was closed, or is minimized.
+            result = dialog.run()
+            return result
+        finally:
+            self.active_pairing_dialog = None
+            dialog.close()
+            dialog.deleteLater()
 
     def reconcile_profiles(self):
         self.state.reconcile()
@@ -462,6 +540,7 @@ class Backend(QObject):
         self.ssh_verified.discard(device_id)
         self.phases.pop(device_id, None)
         self.peer_errors.pop(device_id, None)
+        self.offered_transport_approval.discard(device_id)
         self.reconcile_profiles()
         if notify:
             call(self.device(device_id), "unpair")
@@ -581,6 +660,7 @@ class Backend(QObject):
         return {"schema": 1, "version": VERSION, "hostname": self.host, "devices": self.rows(),
                 "identityProblem": self.key_error, "discoveryProblem": self.scan_error,
                 "lastOperationError": self.last_operation_error, "recentEvents": list(self.recent_events),
+                "approvalPromptVisible": bool(self.active_pairing_dialog and self.active_pairing_dialog.isVisible()),
                 "services": {"backend": "device-links.service", "discovery": "kdeconnectd"}}
 
     def accept(self):
@@ -634,6 +714,10 @@ class Backend(QObject):
             self.send(client, {"error": str(exc)})
 
     def shutdown(self):
+        self._closing = True
+        self.timer.stop()
+        if self.active_pairing_dialog:
+            self.active_pairing_dialog.reject()
         for session in list(self.sudo.values()):
             session.process.closeWriteChannel()
             if not session.process.waitForFinished(2000):

@@ -41,7 +41,10 @@ def main():
         from PySide6.QtWidgets import QApplication
         from .backend import Backend
         app = QApplication(sys.argv[:1])
-        app.setApplicationName("Device Links")
+        # Stable Wayland app_id and X11 WM_CLASS for narrowly scoped consent
+        # rules. Keep the user-facing name independent of that identity.
+        app.setApplicationName("org.amber.DeviceLinks")
+        app.setApplicationDisplayName("Device Links")
         app.setDesktopFileName("org.amber.DeviceLinks")
         app.setQuitOnLastWindowClosed(False)
         backend = Backend(app, args.config)
