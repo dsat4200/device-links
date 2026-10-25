@@ -38,6 +38,7 @@ in pkgs.stdenvNoCC.mkDerivation {
   installPhase = ''
     mkdir -p $out/lib/device-links $out/bin $out/share/doc/device-links
     cp -r device_links $out/lib/device-links/
+    find $out/lib/device-links -type d -name __pycache__ -prune -exec rm -rf {} +
     cp README.md docs/PROTOCOL.md $out/share/doc/device-links/
     makeWrapper ${python}/bin/python $out/bin/device-links \
       --add-flags "-m device_links" \

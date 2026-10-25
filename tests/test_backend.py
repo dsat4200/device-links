@@ -115,6 +115,15 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(window.buttons["Open in Remmina"].isEnabled())
         self.assertIn("RDP", window.details.text())
 
+    def test_approved_but_unconfirmed_link_is_visible_and_revocable(self):
+        self.backend.state.approve("one", "certificate", "other")
+        window = Window(self.backend)
+        self.backend.window = window
+        window.devices.setCurrentRow(0)
+        self.assertIn("waiting for peer approval", window.devices.currentItem().text())
+        self.assertFalse(window.buttons["Link"].isEnabled())
+        self.assertTrue(window.buttons["Unlink"].isEnabled())
+
     def test_dbus_error_enum_available(self):
         self.assertIsNotNone(QDBusMessage.ErrorMessage)
 

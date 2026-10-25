@@ -15,7 +15,7 @@ class SudoTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         sudo = root / "sudo"
-        sudo.write_text('''#!/usr/bin/env python3
+        sudo.write_text(f'''#!{sys.executable}
 import os, pathlib, subprocess, sys
 ticket = pathlib.Path(os.environ['TICKET'])
 args = sys.argv[1:]

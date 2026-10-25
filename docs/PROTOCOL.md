@@ -29,15 +29,19 @@ Pair/approve/accept are deliberately not in the agent API. gsudo streams bounded
 base64 stdout/stderr frames and a final exit code. Same-UID local applications
 can request a prompt but not approve it through this API.
 
-Remote sudo worker: launched only through authenticated, host-key-pinned SSH.
-It validates a password with `sudo -S -v` in a pipe, then executes argv with
-`sudo -n --` and closed stdin. This keeps the password out of the command's
-stdin, argv, environment and logs. The persistent worker is the parent of all
-sudo calls on that connection, providing the no-TTY parent-PID ticket scope.
-No global sudoers change is installed. Ticket behavior must be tested on the
-target's sudo/PAM policy: unsupported policies may prompt more often, never
-fall back to passwordless access. Without Remember, invalidate after each
-command. EOF, cancellation or backend shutdown ends the worker and its ticket.
+Remote sudo worker: launched only through authenticated, host-key-pinned SSH
+using the stable system paths (`/run/current-system/sw/bin/device-links` and the
+setuid `/run/wrappers/bin/sudo`), because sshd's non-interactive PATH excludes
+user profiles. It validates a password with `sudo -S -v` in a pipe, then
+executes argv with `sudo -n --` and closed stdin. This keeps the password out of
+the command's stdin, argv, environment and logs. The persistent worker is the
+parent of all sudo calls on that connection, providing the no-TTY parent-PID
+ticket scope. No global sudoers change is installed. Ticket behavior must be
+tested on the target's sudo/PAM policy: a policy with terminal/global tickets may
+share one with other no-terminal processes of the same user, and unsupported
+policies may prompt more often, never fall back to passwordless access. Without
+Remember, invalidate after each command. EOF, cancellation or backend shutdown
+ends the worker and its ticket.
 
 Limitations: discovery is same-LAN, pairing needs a graphical session, desktop
 endpoint declarations do not install/enable a server, and revocation cannot

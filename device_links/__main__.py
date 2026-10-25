@@ -12,7 +12,7 @@ from .transport import remote_command, ssh_args, sudo_worker
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Discover, link and diagnose configured LAN devices. Pairing approval is GUI-only. Remote desktop viewing belongs to Remmina.")
+    parser = argparse.ArgumentParser(prog="device-links", description="Discover, link and diagnose configured LAN devices. Pairing approval is GUI-only. Remote desktop viewing belongs to Remmina.")
     parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("gui", help="Open the Device Links window")
@@ -30,7 +30,7 @@ def main():
         if cmd == "gsudo":
             p.add_argument("purpose")
         p.add_argument("argv", nargs=argparse.REMAINDER)
-    sub.add_parser("_sudo-worker", help=argparse.SUPPRESS)
+    sub.add_parser("_sudo-worker", help="internal SSH worker")
     args = parser.parse_args()
     command = args.command or "gui"
     if command == "_sudo-worker":

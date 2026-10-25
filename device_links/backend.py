@@ -228,8 +228,8 @@ class Backend(QObject):
             if not daemon.isValid():
                 if self.kde_process is None:
                     self.kde_process = QProcess(self)
-                    self.kde_process.setStandardOutputFile(os.devnull)
-                    self.kde_process.setStandardErrorFile(os.devnull)
+                    # Keep discovery diagnostics in the device-links user journal.
+                    self.kde_process.finished.connect(lambda *_: setattr(self, "kde_process", None))
                     self.kde_process.start(os.environ["DEVICE_LINKS_KDECONNECT"], [])
                 self.scan_error = "Waiting for discovery service"
                 return
@@ -288,6 +288,8 @@ class Backend(QObject):
         self.pairing_dialogs.add(device_id)
         try:
             device = self.device(device_id)
+            if not device.property("isReachable") and not incoming:
+                raise ValueError("Device is not reachable. Use Rescan after both devices are online.")
             if not incoming and not device.property("isPaired"):
                 call(device, "requestPairing")
             code = call(device, "verificationKey")
@@ -298,7 +300,7 @@ class Backend(QObject):
                 "This grants SSH access to your account in both directions.\n"
                 "Approve only devices you control.", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if result == QMessageBox.Yes:
-                self.state.approve(device_id, call(device, "encryptionInfo"))
+                self.state.approve(device_id, call(device, "encryptionInfo"), device.property("name"))
                 if device.property("isPairRequestedByPeer"):
                     call(device, "acceptPairing")
             else:
@@ -355,15 +357,19 @@ class Backend(QObject):
             if host == self.host:
                 continue
             found = [p for p in self.peers.values() if p["hostname"] == host]
-            if not found:
-                found = [{"id": key, "hostname": host, "reachable": False, "paired": True}
-                         for key, value in linked.items() if value["hostname"] == host]
+            discovered = {p["id"] for p in found}
+            for key, value in self.state.peers.items():
+                if key not in discovered and value.get("hostname") == host:
+                    found.append({"id": key, "hostname": host,
+                                  "reachable": False, "paired": bool(value.get("descriptor")),
+                                  "requested": False, "incoming": False})
             if not found:
                 found = [{"id": None, "hostname": host, "reachable": False, "paired": False}]
             for peer in found:
                 row = {k: v for k, v in peer.items() if k != "certificate"}
                 key = row["id"]
                 row["linked"] = key in linked
+                row["approved"] = key in self.state.peers
                 row["desktopEndpoints"] = linked.get(key, {}).get("desktopEndpoints", [])
                 row["problem"] = self.problems.get(key)
                 rows.append(row)

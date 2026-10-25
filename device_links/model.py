@@ -90,10 +90,15 @@ class State:
     def save(self):
         atomic(self.root / "peers.json", json.dumps(self.peers, indent=2) + "\n")
 
-    def approve(self, device_id, certificate):
+    def approve(self, device_id, certificate, hostname=None):
         if not DEVICE_ID.fullmatch(device_id) or not certificate or len(certificate) > 8192:
             raise ValueError("Invalid pairing identity")
-        self.peers[device_id] = {"certificate": certificate, "approved": True}
+        if hostname is not None and hostname not in self.roster:
+            raise ValueError("Peer is not in this configuration's device roster")
+        record = {"certificate": certificate, "approved": True}
+        if hostname is not None:
+            record["hostname"] = hostname
+        self.peers[device_id] = record
         self.save()
 
     def receive(self, device_id, certificate, document):
@@ -108,6 +113,7 @@ class State:
                for key, value in self.peers.items()):
             raise ValueError("A different identity already uses this device name")
         peer["descriptor"] = data
+        peer["hostname"] = data["hostname"]
         self.save()
         self.reconcile()
         return data

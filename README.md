@@ -47,12 +47,14 @@ prevent discovery or SSH; the app cannot override those network policies.
 Remote administrator commands use a dedicated SSH worker and a local password
 dialog. They are noninteractive: their stdin is closed; use `exec` or an SSH
 terminal for interactive programs. The dialog identifies the target, purpose
-and exact argv. Cancellation does not execute the command. “Remember” reuses a
-parent-process sudo ticket on that particular SSH connection, subject to sudo's
-own expiry and a five-minute connection idle limit. No password is cached or
-persisted. Closing the window does not end remembered authorization; stopping
-the backend or logging out does. Screen locking is not currently a logout;
-use **Unlink** or stop the backend to end an active link session immediately.
+and exact argv. Cancellation does not execute the command. “Remember” reuses
+the target's sudo ticket for that no-terminal SSH session, subject to sudo/PAM
+expiry and a five-minute connection idle limit. No password is cached or
+persisted. Sudo policy may share that ticket with another no-terminal process
+of the same target user while the link is open; disconnecting invalidates it.
+Closing the window does not end remembered authorization; stopping the backend
+or logging out does. Screen locking is not currently a logout; use **Unlink** or
+stop the backend to end an active link session immediately.
 
 Unlink removes app-managed keys, host entries and profiles, not independently
 configured access or already-running SSH sessions. A compromised peer can have
